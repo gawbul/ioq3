@@ -350,7 +350,7 @@ void RB_MDRSurfaceAnim( mdrSurface_t *surface )
 	oldFrame = (mdrFrame_t *)((byte *)header + header->ofsFrames +
 		backEnd.currentEntity->e.oldframe * frameSize );
 
-	RB_CheckOverflow( surface->numVerts, surface->numTriangles );
+	RB_CHECKOVERFLOW( surface->numVerts, surface->numTriangles * 3 );
 
 	triangles	= (int *) ((byte *)surface + surface->ofsTriangles);
 	indexes		= surface->numTriangles * 3;
@@ -412,10 +412,10 @@ void RB_MDRSurfaceAnim( mdrSurface_t *surface )
 		tess.xyz[baseVertex + j][1] = tempVert[1];
 		tess.xyz[baseVertex + j][2] = tempVert[2];
 
-		R_VaoPackNormal((byte *)&tess.normal[baseVertex + j], tempNormal);
+		R_VaoPackNormal(tess.normal[baseVertex + j], tempNormal);
 
-		tess.texCoords[baseVertex + j][0][0] = v->texCoords[0];
-		tess.texCoords[baseVertex + j][0][1] = v->texCoords[1];
+		tess.texCoords[baseVertex + j][0] = v->texCoords[0];
+		tess.texCoords[baseVertex + j][1] = v->texCoords[1];
 
 		v = (mdrVertex_t *)&v->weights[v->numWeights];
 	}
