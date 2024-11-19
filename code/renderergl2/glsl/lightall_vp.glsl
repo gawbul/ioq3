@@ -12,6 +12,9 @@ attribute vec4 attr_Tangent;
 attribute vec3 attr_Position2;
 attribute vec3 attr_Normal2;
 attribute vec4 attr_Tangent2;
+#elif defined(USE_BONE_ANIMATION)
+attribute vec4 attr_BoneIndexes;
+attribute vec4 attr_BoneWeights;
 #endif
 
 #if defined(USE_LIGHT) && !defined(USE_LIGHT_VECTOR)
@@ -34,8 +37,14 @@ uniform vec3   u_LocalViewOrigin;
 #endif
 
 #if defined(USE_TCMOD)
-uniform vec4   u_DiffuseTexMatrix;
-uniform vec4   u_DiffuseTexOffTurb;
+uniform vec4   u_DiffuseTexMatrix0;
+uniform vec4   u_DiffuseTexMatrix1;
+uniform vec4   u_DiffuseTexMatrix2;
+uniform vec4   u_DiffuseTexMatrix3;
+uniform vec4   u_DiffuseTexMatrix4;
+uniform vec4   u_DiffuseTexMatrix5;
+uniform vec4   u_DiffuseTexMatrix6;
+uniform vec4   u_DiffuseTexMatrix7;
 #endif
 
 uniform mat4   u_ModelViewProjectionMatrix;
@@ -48,6 +57,8 @@ uniform mat4   u_ModelMatrix;
 
 #if defined(USE_VERTEX_ANIMATION)
 uniform float  u_VertexLerp;
+#elif defined(USE_BONE_ANIMATION)
+uniform mat4 u_BoneMatrix[MAX_GLSL_BONES];
 #endif
 
 #if defined(USE_LIGHT_VECTOR)
@@ -109,19 +120,28 @@ vec2 GenTexCoords(int TCGen, vec3 position, vec3 normal, vec3 TCGenVector0, vec3
 #endif
 
 #if defined(USE_TCMOD)
-vec2 ModTexCoords(vec2 st, vec3 position, vec4 texMatrix, vec4 offTurb)
+vec2 ModTexCoords(vec2 st, vec3 position, vec4 texMatrix[8])
 {
-	float amplitude = offTurb.z;
-	float phase = offTurb.w * 2.0 * M_PI;
-	vec2 st2;
-	st2.x = st.x * texMatrix.x + (st.y * texMatrix.z + offTurb.x);
-	st2.y = st.x * texMatrix.y + (st.y * texMatrix.w + offTurb.y);
-
+	vec2 st2 = st;
 	vec2 offsetPos = vec2(position.x + position.z, position.y);
 
-	vec2 texOffset = sin(offsetPos * (2.0 * M_PI / 1024.0) + vec2(phase));
+	st2 = vec2(st2.x * texMatrix[0].x + st2.y * texMatrix[0].y + texMatrix[0].z,
+	           st2.x * texMatrix[1].x + st2.y * texMatrix[1].y + texMatrix[1].z);
+	st2 += texMatrix[0].w * sin(offsetPos * (2.0 * M_PI / 1024.0) + vec2(texMatrix[1].w * 2.0 * M_PI));
 
-	return st2 + texOffset * amplitude;	
+	st2 = vec2(st2.x * texMatrix[2].x + st2.y * texMatrix[2].y + texMatrix[2].z,
+	           st2.x * texMatrix[3].x + st2.y * texMatrix[3].y + texMatrix[3].z);
+	st2 += texMatrix[2].w * sin(offsetPos * (2.0 * M_PI / 1024.0) + vec2(texMatrix[3].w * 2.0 * M_PI));
+
+	st2 = vec2(st2.x * texMatrix[4].x + st2.y * texMatrix[4].y + texMatrix[4].z,
+	           st2.x * texMatrix[5].x + st2.y * texMatrix[5].y + texMatrix[5].z);
+	st2 += texMatrix[4].w * sin(offsetPos * (2.0 * M_PI / 1024.0) + vec2(texMatrix[5].w * 2.0 * M_PI));
+
+	st2 = vec2(st2.x * texMatrix[6].x + st2.y * texMatrix[6].y + texMatrix[6].z,
+	           st2.x * texMatrix[7].x + st2.y * texMatrix[7].y + texMatrix[7].z);
+	st2 += texMatrix[6].w * sin(offsetPos * (2.0 * M_PI / 1024.0) + vec2(texMatrix[7].w * 2.0 * M_PI));
+
+	return st2;
 }
 #endif
 
@@ -151,6 +171,18 @@ void main()
   #if defined(USE_LIGHT) && !defined(USE_FAST_LIGHT)
 	vec3 tangent   = mix(attr_Tangent.xyz, attr_Tangent2.xyz, u_VertexLerp);
   #endif
+#elif defined(USE_BONE_ANIMATION)
+	mat4 vtxMat  = u_BoneMatrix[int(attr_BoneIndexes.x)] * attr_BoneWeights.x;
+	     vtxMat += u_BoneMatrix[int(attr_BoneIndexes.y)] * attr_BoneWeights.y;
+	     vtxMat += u_BoneMatrix[int(attr_BoneIndexes.z)] * attr_BoneWeights.z;
+	     vtxMat += u_BoneMatrix[int(attr_BoneIndexes.w)] * attr_BoneWeights.w;
+	mat3 nrmMat = mat3(cross(vtxMat[1].xyz, vtxMat[2].xyz), cross(vtxMat[2].xyz, vtxMat[0].xyz), cross(vtxMat[0].xyz, vtxMat[1].xyz));
+
+	vec3 position  = vec3(vtxMat * vec4(attr_Position, 1.0));
+	vec3 normal    = normalize(nrmMat * attr_Normal);
+  #if defined(USE_LIGHT) && !defined(USE_FAST_LIGHT)
+	vec3 tangent   = normalize(nrmMat * attr_Tangent.xyz);
+  #endif
 #else
 	vec3 position  = attr_Position;
 	vec3 normal    = attr_Normal;
@@ -166,7 +198,16 @@ void main()
 #endif
 
 #if defined(USE_TCMOD)
-	var_TexCoords.xy = ModTexCoords(texCoords, position, u_DiffuseTexMatrix, u_DiffuseTexOffTurb);
+	vec4 diffuseTexMatrix[8];
+	diffuseTexMatrix[0] = u_DiffuseTexMatrix0;
+	diffuseTexMatrix[1] = u_DiffuseTexMatrix1;
+	diffuseTexMatrix[2] = u_DiffuseTexMatrix2;
+	diffuseTexMatrix[3] = u_DiffuseTexMatrix3;
+	diffuseTexMatrix[4] = u_DiffuseTexMatrix4;
+	diffuseTexMatrix[5] = u_DiffuseTexMatrix5;
+	diffuseTexMatrix[6] = u_DiffuseTexMatrix6;
+	diffuseTexMatrix[7] = u_DiffuseTexMatrix7;
+	var_TexCoords.xy = ModTexCoords(texCoords, position, diffuseTexMatrix);
 #else
 	var_TexCoords.xy = texCoords;
 #endif

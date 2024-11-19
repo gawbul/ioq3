@@ -20,6 +20,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
 
+// Use EnumProcesses() with Windows XP compatibility
+#define PSAPI_VERSION 1
+
 #include "../qcommon/q_shared.h"
 #include "../qcommon/qcommon.h"
 #include "sys_local.h"
@@ -39,6 +42,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <psapi.h>
 #include <float.h>
 
+#ifndef KEY_WOW64_32KEY
+#define KEY_WOW64_32KEY 0x0200
+#endif
+
 // Used to determine where to store user-specific files
 static char homePath[ MAX_OSPATH ] = { 0 };
 
@@ -47,6 +54,9 @@ static char steamPath[ MAX_OSPATH ] = { 0 };
 
 // Used to store the GOG Quake 3 installation path
 static char gogPath[ MAX_OSPATH ] = { 0 };
+
+// Used to store the Microsoft Store Quake 3 installation path
+static char microsoftStorePath[MAX_OSPATH] = { 0 };
 
 #ifndef DEDICATED
 static UINT timerResolution = 0;
@@ -220,6 +230,51 @@ char *Sys_GogPath( void )
 
 /*
 ================
+Sys_MicrosoftStorePath
+================
+*/
+char* Sys_MicrosoftStorePath(void)
+{
+#ifdef MSSTORE_PATH
+	if (!microsoftStorePath[0]) 
+	{
+		TCHAR szPath[MAX_PATH];
+		FARPROC qSHGetFolderPath;
+		HMODULE shfolder = LoadLibrary("shfolder.dll");
+
+		if(shfolder == NULL)
+		{
+			Com_Printf("Unable to load SHFolder.dll\n");
+			return microsoftStorePath;
+		}
+
+		qSHGetFolderPath = GetProcAddress(shfolder, "SHGetFolderPathA");
+		if(qSHGetFolderPath == NULL)
+		{
+			Com_Printf("Unable to find SHGetFolderPath in SHFolder.dll\n");
+			FreeLibrary(shfolder);
+			return microsoftStorePath;
+		}
+
+		if( !SUCCEEDED( qSHGetFolderPath( NULL, CSIDL_PROGRAM_FILES,
+						NULL, 0, szPath ) ) )
+		{
+			Com_Printf("Unable to detect CSIDL_PROGRAM_FILES\n");
+			FreeLibrary(shfolder);
+			return microsoftStorePath;
+		}
+
+		FreeLibrary(shfolder);
+
+		// default: C:\Program Files\ModifiableWindowsApps\Quake 3\EN
+		Com_sprintf(microsoftStorePath, sizeof(microsoftStorePath), "%s%cModifiableWindowsApps%c%s%cEN", szPath, PATH_SEP, PATH_SEP, MSSTORE_PATH, PATH_SEP);
+	}
+#endif
+	return microsoftStorePath;
+}
+
+/*
+================
 Sys_Milliseconds
 ================
 */
@@ -353,6 +408,14 @@ Sys_FOpen
 ==============
 */
 FILE *Sys_FOpen( const char *ospath, const char *mode ) {
+	size_t length;
+
+	// Windows API ignores all trailing spaces and periods which can get around Quake 3 file system restrictions.
+	length = strlen( ospath );
+	if ( length == 0 || ospath[length-1] == ' ' || ospath[length-1] == '.' ) {
+		return NULL;
+	}
+
 	return fopen( ospath, mode );
 }
 
@@ -420,6 +483,10 @@ void Sys_ListFilteredFiles( const char *basedir, char *subdirs, char *filter, ch
 	struct _finddata_t findinfo;
 
 	if ( *numfiles >= MAX_FOUND_FILES - 1 ) {
+		return;
+	}
+
+	if ( basedir[0] == '\0' ) {
 		return;
 	}
 
@@ -522,6 +589,11 @@ char **Sys_ListFiles( const char *directory, const char *extension, char *filter
 		listCopy[i] = NULL;
 
 		return listCopy;
+	}
+
+	if ( directory[0] == '\0' ) {
+		*numfiles = 0;
+		return NULL;
 	}
 
 	if ( !extension) {
@@ -655,6 +727,8 @@ Display an error message
 */
 void Sys_ErrorDialog( const char *error )
 {
+	Sys_Print( va( "%s\n", error ) );
+
 	if( Sys_Dialog( DT_YES_NO, va( "%s. Copy console log to clipboard?", error ),
 			"Error" ) == DR_YES )
 	{
@@ -837,4 +911,15 @@ qboolean Sys_PIDIsRunning( int pid )
 	}
 
 	return qfalse;
+}
+
+/*
+=================
+Sys_DllExtension
+
+Check if filename should be allowed to be loaded as a DLL.
+=================
+*/
+qboolean Sys_DllExtension( const char *name ) {
+	return COM_CompareExtension( name, DLL_EXT );
 }

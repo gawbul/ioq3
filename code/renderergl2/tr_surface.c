@@ -21,9 +21,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 // tr_surf.c
 #include "tr_local.h"
-#if idppc_altivec && !defined(__APPLE__)
-#include <altivec.h>
-#endif
 
 /*
 
@@ -451,35 +448,6 @@ static qboolean RB_SurfaceVaoCached(int numVerts, srfVert_t *verts, int numIndex
 }
 
 
-static qboolean RB_SurfaceVao(vao_t *vao, int numVerts, int numIndexes, int firstIndex, int dlightBits, int pshadowBits, qboolean shaderCheck)
-{
-	if (!vao)
-	{
-		return qfalse;
-	}
-
-	if (shaderCheck && !(!ShaderRequiresCPUDeforms(tess.shader) && !tess.shader->isSky && !tess.shader->isPortal))
-	{
-		return qfalse;
-	}
-
-	RB_CheckVao(vao);
-
-	tess.dlightBits |= dlightBits;
-	tess.pshadowBits |= pshadowBits;
-
-	RB_EndSurface();
-	RB_BeginSurface(tess.shader, tess.fogNum, tess.cubemapIndex);
-
-	backEnd.pc.c_staticVaoDraws++;
-
-	tess.numIndexes = numIndexes;
-	tess.numVertexes = numVerts;
-
-	return qtrue;
-}
-
-
 /*
 =============
 RB_SurfaceTriangles
@@ -574,6 +542,8 @@ static void RB_SurfaceBeam( void )
 	GLSL_SetUniformMat4(sp, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection);
 					
 	GLSL_SetUniformVec4(sp, UNIFORM_COLOR, colorRed);
+
+	GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 0);
 
 	R_DrawElements(tess.numIndexes, tess.firstIndex);
 
@@ -1236,12 +1206,6 @@ static void RB_SurfaceFlare(srfFlare_t *surf)
 		RB_AddFlare(surf, tess.fogNum, surf->origin, surf->color, surf->normal);
 }
 
-static void RB_SurfaceVaoMesh(srfBspSurface_t * srf)
-{
-	RB_SurfaceVao (srf->vao, srf->numVerts, srf->numIndexes, srf->firstIndex,
-			srf->dlightBits, srf->pshadowBits, qfalse );
-}
-
 void RB_SurfaceVaoMdvMesh(srfVaoMdvMesh_t * surface)
 {
 	//mdvModel_t     *mdvModel;
@@ -1348,6 +1312,6 @@ void (*rb_surfaceTable[SF_NUM_SURFACE_TYPES])( void *) = {
 	(void(*)(void*))RB_IQMSurfaceAnim,		// SF_IQM,
 	(void(*)(void*))RB_SurfaceFlare,		// SF_FLARE,
 	(void(*)(void*))RB_SurfaceEntity,		// SF_ENTITY
-	(void(*)(void*))RB_SurfaceVaoMesh,	    // SF_VAO_MESH,
 	(void(*)(void*))RB_SurfaceVaoMdvMesh,   // SF_VAO_MDVMESH
+	(void(*)(void*))RB_IQMSurfaceAnimVao,   // SF_VAO_IQM
 };

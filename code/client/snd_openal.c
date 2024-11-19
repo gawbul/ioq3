@@ -900,7 +900,8 @@ static void S_AL_NewLoopMaster(src_t *rmSource, qboolean iskilled)
 				S_AL_SaveLoopPos(rmSource, rmSource->alSource);
 			}
 		}
-		else if(rmSource == &srcList[curSfx->masterLoopSrc])
+		else if(curSfx->masterLoopSrc != -1 &&
+		        rmSource == &srcList[curSfx->masterLoopSrc])
 		{
 			int firstInactive = -1;
 
@@ -2206,7 +2207,9 @@ static ALCdevice *alCaptureDevice;
 static cvar_t *s_alCapture;
 #endif
 
-#ifdef _WIN32
+#if defined(_WIN64)
+#define ALDRIVER_DEFAULT "OpenAL64.dll"
+#elif defined(_WIN32)
 #define ALDRIVER_DEFAULT "OpenAL32.dll"
 #elif defined(__APPLE__)
 #define ALDRIVER_DEFAULT "/System/Library/Frameworks/OpenAL.framework/OpenAL"
@@ -2516,12 +2519,6 @@ qboolean S_AL_Init( soundInterface_t *si )
 
 	s_alInputDevice = Cvar_Get( "s_alInputDevice", "", CVAR_ARCHIVE | CVAR_LATCH );
 	s_alDevice = Cvar_Get("s_alDevice", "", CVAR_ARCHIVE | CVAR_LATCH);
-
-	if ( COM_CompareExtension( s_alDriver->string, ".pk3" ) )
-	{
-		Com_Printf( "Rejecting DLL named \"%s\"", s_alDriver->string );
-		return qfalse;
-	}
 
 	// Load QAL
 	if( !QAL_Init( s_alDriver->string ) )

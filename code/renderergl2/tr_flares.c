@@ -79,7 +79,7 @@ typedef struct flare_s {
 	vec3_t		color;
 } flare_t;
 
-#define		MAX_FLARES		128
+#define		MAX_FLARES		256
 
 flare_t		r_flareStructs[MAX_FLARES];
 flare_t		*r_activeFlares, *r_inactiveFlares;
@@ -478,6 +478,14 @@ void RB_RenderFlares (void) {
 		return;
 	}
 
+	if ( r_flares->modified ) {
+		if ( qglesMajorVersion >= 1 && !glRefConfig.readDepth ) {
+			ri.Printf( PRINT_WARNING, "OpenGL ES needs GL_NV_read_depth to read depth to determine if flares are visible\n" );
+			ri.Cvar_Set( "r_flares", "0" );
+		}
+		r_flares->modified = qfalse;
+	}
+
 	if(r_flareCoeff->modified)
 	{
 		R_SetFlareCoeff();
@@ -524,10 +532,6 @@ void RB_RenderFlares (void) {
 
 	if ( !draw ) {
 		return;		// none visible
-	}
-
-	if ( backEnd.viewParms.isPortal ) {
-		qglDisable (GL_CLIP_PLANE0);
 	}
 
 	Mat4Copy(glState.projection, oldprojection);

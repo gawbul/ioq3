@@ -222,7 +222,6 @@ void R_ImageList_f( void ) {
 				estSize *= 4;
 				break;
 			case GL_LUMINANCE8:
-			case GL_LUMINANCE16:
 			case GL_LUMINANCE:
 				format = "L      ";
 				// 1 byte per pixel?
@@ -235,7 +234,6 @@ void R_ImageList_f( void ) {
 				estSize *= 3;
 				break;
 			case GL_LUMINANCE8_ALPHA8:
-			case GL_LUMINANCE16_ALPHA16:
 			case GL_LUMINANCE_ALPHA:
 				format = "LA     ";
 				// 2 bytes per pixel?
@@ -1457,6 +1455,106 @@ byte	mipBlendColors[16][4] = {
 	{0,0,255,128},
 };
 
+/*
+==================
+R_ConvertTextureFormat
+
+Convert RGBA unsigned byte to specified format and type
+==================
+*/
+#define ROW_PADDING( width, bpp, alignment ) PAD( (width) * (bpp), (alignment) ) - (width) * (bpp)
+void R_ConvertTextureFormat( const byte *in, int width, int height, GLenum format, GLenum type, byte *out )
+{
+	int x, y, rowPadding;
+	int unpackAlign = 4; // matches GL_UNPACK_ALIGNMENT default
+
+	if ( format == GL_RGB && type == GL_UNSIGNED_BYTE )
+	{
+		rowPadding = ROW_PADDING( width, 3, unpackAlign );
+
+		for ( y = 0; y < height; y++ )
+		{
+			for ( x = 0; x < width; x++ )
+			{
+				*out++ = *in++;
+				*out++ = *in++;
+				*out++ = *in++;
+				in++;
+			}
+
+			out += rowPadding;
+		}
+	}
+	else if ( format == GL_LUMINANCE && type == GL_UNSIGNED_BYTE )
+	{
+		rowPadding = ROW_PADDING( width, 1, unpackAlign );
+
+		for ( y = 0; y < height; y++ )
+		{
+			for ( x = 0; x < width; x++ )
+			{
+				*out++ = *in++; // red
+				in += 3;
+			}
+
+			out += rowPadding;
+		}
+	}
+	else if ( format == GL_LUMINANCE_ALPHA && type == GL_UNSIGNED_BYTE )
+	{
+		rowPadding = ROW_PADDING( width, 2, unpackAlign );
+
+		for ( y = 0; y < height; y++ )
+		{
+			for ( x = 0; x < width; x++ )
+			{
+				*out++ = *in++; // red
+				in += 2;
+				*out++ = *in++; // alpha
+			}
+
+			out += rowPadding;
+		}
+	}
+	else if ( format == GL_RGB && type == GL_UNSIGNED_SHORT_5_6_5 )
+	{
+		rowPadding = ROW_PADDING( width, 2, unpackAlign );
+
+		for ( y = 0; y < height; y++ )
+		{
+			for ( x = 0; x < width; x++, in += 4, out += 2 )
+			{
+				*((unsigned short*)out) = ( (unsigned short)( in[0] >> 3 ) << 11 )
+					    | ( (unsigned short)( in[1] >> 2 ) << 5 )
+					    | ( (unsigned short)( in[2] >> 3 ) << 0 );
+			}
+
+			out += rowPadding;
+		}
+	}
+	else if ( format == GL_RGBA && type == GL_UNSIGNED_SHORT_4_4_4_4 )
+	{
+		rowPadding = ROW_PADDING( width, 2, unpackAlign );
+
+		for ( y = 0; y < height; y++ )
+		{
+			for ( x = 0; x < width; x++, in += 4, out += 2 )
+			{
+				*((unsigned short*)out) = ( (unsigned short)( in[0] >> 4 ) << 12 )
+					    | ( (unsigned short)( in[1] >> 4 ) << 8 )
+					    | ( (unsigned short)( in[2] >> 4 ) << 4 )
+					    | ( (unsigned short)( in[3] >> 4 ) << 0 );
+			}
+
+			out += rowPadding;
+		}
+	}
+	else
+	{
+		ri.Error( ERR_DROP, "Unable to convert RGBA image to OpenGL format 0x%X and type 0x%X", format, type );
+	}
+}
+
 static void RawImage_SwizzleRA( byte *data, int width, int height )
 {
 	int i;
@@ -1707,7 +1805,9 @@ static GLenum RawImage_GetFormat(const byte *data, int numPixels, GLenum picForm
 	}
 	else if(lightMap)
 	{
-		if(r_greyscale->integer)
+		// GL_LUMINANCE is not valid for OpenGL 3.2 Core context and
+		// everything becomes solid black
+		if(0 && r_greyscale->integer)
 			internalFormat = GL_LUMINANCE;
 		else
 			internalFormat = GL_RGBA;
@@ -1722,12 +1822,10 @@ static GLenum RawImage_GetFormat(const byte *data, int numPixels, GLenum picForm
 		// select proper internal format
 		if ( samples == 3 )
 		{
-			if(r_greyscale->integer)
+			if(0 && r_greyscale->integer)
 			{
-				if(r_texturebits->integer == 16)
+				if(r_texturebits->integer == 16 || r_texturebits->integer == 32)
 					internalFormat = GL_LUMINANCE8;
-				else if(r_texturebits->integer == 32)
-					internalFormat = GL_LUMINANCE16;
 				else
 					internalFormat = GL_LUMINANCE;
 			}
@@ -1761,12 +1859,10 @@ static GLenum RawImage_GetFormat(const byte *data, int numPixels, GLenum picForm
 		}
 		else if ( samples == 4 )
 		{
-			if(r_greyscale->integer)
+			if(0 && r_greyscale->integer)
 			{
-				if(r_texturebits->integer == 16)
+				if(r_texturebits->integer == 16 || r_texturebits->integer == 32)
 					internalFormat = GL_LUMINANCE8_ALPHA8;
-				else if(r_texturebits->integer == 32)
-					internalFormat = GL_LUMINANCE16_ALPHA16;
 				else
 					internalFormat = GL_LUMINANCE_ALPHA;
 			}
@@ -1948,18 +2044,20 @@ static GLenum PixelDataFormatFromInternalFormat(GLenum internalFormat)
 	}
 }
 
-static void RawImage_UploadTexture(GLuint texture, byte *data, int x, int y, int width, int height, GLenum target, GLenum picFormat, int numMips, GLenum internalFormat, imgType_t type, imgFlags_t flags, qboolean subtexture )
+static void RawImage_UploadTexture(GLuint texture, byte *data, int x, int y, int width, int height, GLenum target, GLenum picFormat, GLenum dataFormat, GLenum dataType, int numMips, GLenum internalFormat, imgType_t type, imgFlags_t flags, qboolean subtexture )
 {
-	GLenum dataFormat, dataType;
 	qboolean rgtc = internalFormat == GL_COMPRESSED_RG_RGTC2;
 	qboolean rgba8 = picFormat == GL_RGBA8 || picFormat == GL_SRGB8_ALPHA8_EXT;
 	qboolean rgba = rgba8 || picFormat == GL_RGBA16;
 	qboolean mipmap = !!(flags & IMGFLAG_MIPMAP);
 	int size, miplevel;
 	qboolean lastMip = qfalse;
+	byte *formatBuffer = NULL;
 
-	dataFormat = PixelDataFormatFromInternalFormat(internalFormat);
-	dataType = picFormat == GL_RGBA16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+	if (qglesMajorVersion && rgba8 && (dataFormat != GL_RGBA || dataType != GL_UNSIGNED_BYTE))
+	{
+		formatBuffer = ri.Hunk_AllocateTempMemory(4 * width * height);
+	}
 
 	miplevel = 0;
 	do
@@ -1978,6 +2076,11 @@ static void RawImage_UploadTexture(GLuint texture, byte *data, int x, int y, int
 
 			if (rgba8 && rgtc)
 				RawImage_UploadToRgtc2Texture(texture, miplevel, x, y, width, height, data);
+			else if (formatBuffer)
+			{
+				R_ConvertTextureFormat(data, width, height, dataFormat, dataType, formatBuffer);
+				qglTextureSubImage2DEXT(texture, target, miplevel, x, y, width, height, dataFormat, dataType, formatBuffer);
+			}
 			else
 				qglTextureSubImage2DEXT(texture, target, miplevel, x, y, width, height, dataFormat, dataType, data);
 		}
@@ -2011,6 +2114,9 @@ static void RawImage_UploadTexture(GLuint texture, byte *data, int x, int y, int
 		}
 	}
 	while (!lastMip);
+
+	if (formatBuffer != NULL)
+		ri.Hunk_FreeTempMemory(formatBuffer);
 }
 
 
@@ -2020,7 +2126,7 @@ Upload32
 
 ===============
 */
-static void Upload32(byte *data, int x, int y, int width, int height, GLenum picFormat, int numMips, image_t *image, qboolean scaled)
+static void Upload32(byte *data, int x, int y, int width, int height, GLenum picFormat, GLenum dataFormat, GLenum dataType, int numMips, image_t *image, qboolean scaled)
 {
 	int			i, c;
 	byte		*scan;
@@ -2075,7 +2181,7 @@ static void Upload32(byte *data, int x, int y, int width, int height, GLenum pic
 		for (i = 0; i < 6; i++)
 		{
 			int w2 = width, h2 = height;
-			RawImage_UploadTexture(image->texnum, data, x, y, width, height, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, picFormat, numMips, internalFormat, type, flags, qfalse);
+			RawImage_UploadTexture(image->texnum, data, x, y, width, height, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, picFormat, dataFormat, dataType, numMips, internalFormat, type, flags, qfalse);
 			for (c = numMips; c; c--)
 			{
 				data += CalculateMipSize(w2, h2, picFormat);
@@ -2086,7 +2192,7 @@ static void Upload32(byte *data, int x, int y, int width, int height, GLenum pic
 	}
 	else
 	{
-		RawImage_UploadTexture(image->texnum, data, x, y, width, height, GL_TEXTURE_2D, picFormat, numMips, internalFormat, type, flags, qfalse);
+		RawImage_UploadTexture(image->texnum, data, x, y, width, height, GL_TEXTURE_2D, picFormat, dataFormat, dataType, numMips, internalFormat, type, flags, qfalse);
 	}
 
 	GL_CheckErrors();
@@ -2112,7 +2218,7 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 	qboolean    picmip = !!(flags & IMGFLAG_PICMIP);
 	qboolean    lastMip;
 	GLenum textureTarget = cubemap ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
-	GLenum dataFormat;
+	GLenum dataFormat, dataType;
 
 	if (strlen(name) >= MAX_QPATH ) {
 		ri.Error (ERR_DROP, "R_CreateImage: \"%s\" is too long", name);
@@ -2126,7 +2232,7 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 	}
 
 	image = tr.images[tr.numImages] = ri.Hunk_Alloc( sizeof( image_t ), h_low );
-	image->texnum = 1024 + tr.numImages;
+	qglGenTextures(1, &image->texnum);
 	tr.numImages++;
 
 	image->type = type;
@@ -2143,6 +2249,53 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 
 	if (!internalFormat)
 		internalFormat = RawImage_GetFormat(pic, width * height, picFormat, isLightmap, image->type, image->flags);
+
+	dataFormat = PixelDataFormatFromInternalFormat(internalFormat);
+	dataType = picFormat == GL_RGBA16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+
+	// Convert image data format for OpenGL ES, data is converted for each mip level
+	if (qglesMajorVersion)
+	{
+		switch (internalFormat)
+		{
+			case GL_LUMINANCE:
+			case GL_LUMINANCE8:
+				internalFormat = GL_LUMINANCE;
+				dataFormat = GL_LUMINANCE;
+				dataType = GL_UNSIGNED_BYTE;
+				break;
+			case GL_LUMINANCE_ALPHA:
+			case GL_LUMINANCE8_ALPHA8:
+				internalFormat = GL_LUMINANCE_ALPHA;
+				dataFormat = GL_LUMINANCE_ALPHA;
+				dataType = GL_UNSIGNED_BYTE;
+				break;
+			case GL_RGB:
+			case GL_RGB8:
+				internalFormat = GL_RGB;
+				dataFormat = GL_RGB;
+				dataType = GL_UNSIGNED_BYTE;
+				break;
+			case GL_RGB5:
+				internalFormat = GL_RGB;
+				dataFormat = GL_RGB;
+				dataType = GL_UNSIGNED_SHORT_5_6_5;
+				break;
+			case GL_RGBA:
+			case GL_RGBA8:
+				internalFormat = GL_RGBA;
+				dataFormat = GL_RGBA;
+				dataType = GL_UNSIGNED_BYTE;
+				break;
+			case GL_RGBA4:
+				internalFormat = GL_RGBA;
+				dataFormat = GL_RGBA;
+				dataType = GL_UNSIGNED_SHORT_4_4_4_4;
+				break;
+			default:
+				ri.Error( ERR_DROP, "Missing OpenGL ES support for image '%s' with internal format 0x%X\n", name, internalFormat );
+		}
+	}
 
 	image->internalFormat = internalFormat;
 
@@ -2168,7 +2321,6 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 	image->uploadHeight = height;
 
 	// Allocate texture storage so we don't have to worry about it later.
-	dataFormat = PixelDataFormatFromInternalFormat(internalFormat);
 	mipWidth = width;
 	mipHeight = height;
 	miplevel = 0;
@@ -2180,11 +2332,11 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 			int i;
 
 			for (i = 0; i < 6; i++)
-				qglTextureImage2DEXT(image->texnum, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, miplevel, internalFormat, mipWidth, mipHeight, 0, dataFormat, GL_UNSIGNED_BYTE, NULL);
+				qglTextureImage2DEXT(image->texnum, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, miplevel, internalFormat, mipWidth, mipHeight, 0, dataFormat, dataType, NULL);
 		}
 		else
 		{
-			qglTextureImage2DEXT(image->texnum, GL_TEXTURE_2D, miplevel, internalFormat, mipWidth, mipHeight, 0, dataFormat, GL_UNSIGNED_BYTE, NULL);
+			qglTextureImage2DEXT(image->texnum, GL_TEXTURE_2D, miplevel, internalFormat, mipWidth, mipHeight, 0, dataFormat, dataType, NULL);
 		}
 
 		mipWidth  = MAX(1, mipWidth >> 1);
@@ -2195,7 +2347,7 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 
 	// Upload data.
 	if (pic)
-		Upload32(pic, 0, 0, width, height, picFormat, numMips, image, scaled);
+		Upload32(pic, 0, 0, width, height, picFormat, dataFormat, dataType, numMips, image, scaled);
 
 	if (resampledBuffer != NULL)
 		ri.Hunk_FreeTempMemory(resampledBuffer);
@@ -2219,7 +2371,9 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 		case GL_DEPTH_COMPONENT32_ARB:
 			// Fix for sampling depth buffer on old nVidia cards.
 			// from http://www.idevgames.com/forums/thread-4141-post-34844.html#pid34844
-			qglTextureParameterfEXT(image->texnum, textureTarget, GL_DEPTH_TEXTURE_MODE, GL_LUMINANCE);
+			if ( !QGL_VERSION_ATLEAST( 3, 0 ) ) {
+				qglTextureParameterfEXT(image->texnum, textureTarget, GL_DEPTH_TEXTURE_MODE, GL_LUMINANCE);
+			}
 			qglTextureParameterfEXT(image->texnum, textureTarget, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 			qglTextureParameterfEXT(image->texnum, textureTarget, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 			break;
@@ -2254,7 +2408,13 @@ image_t *R_CreateImage(const char *name, byte *pic, int width, int height, imgTy
 
 void R_UpdateSubImage( image_t *image, byte *pic, int x, int y, int width, int height, GLenum picFormat )
 {
-	Upload32(pic, x, y, width, height, picFormat, 0, image, qfalse);
+	GLenum dataFormat, dataType;
+
+	// TODO: This is fine for lightmaps but (unused) general RGBA images need to store dataFormat / dataType in image_t for OpenGL ES?
+	dataFormat = PixelDataFormatFromInternalFormat(image->internalFormat);
+	dataType = picFormat == GL_RGBA16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+
+	Upload32(pic, x, y, width, height, picFormat, dataFormat, dataType, 0, image, qfalse);
 }
 
 //===================================================================
@@ -2286,7 +2446,7 @@ static int numImageLoaders = ARRAY_LEN( imageLoaders );
 =================
 R_LoadImage
 
-Loads any of the supported image types into a cannonical
+Loads any of the supported image types into a canonical
 32 bit format.
 =================
 */
@@ -2768,17 +2928,17 @@ void R_CreateBuiltinImages( void ) {
 
 		tr.renderImage = R_CreateImage("_render", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, hdrFormat);
 
-		if (r_shadowBlur->integer)
+		if (r_shadowBlur->integer || r_hdr->integer)
 			tr.screenScratchImage = R_CreateImage("screenScratch", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, rgbFormat);
 
 		if (r_shadowBlur->integer || r_ssao->integer)
-			tr.hdrDepthImage = R_CreateImage("*hdrDepth", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_INTENSITY32F_ARB);
+			tr.hdrDepthImage = R_CreateImage("*hdrDepth", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_R32F);
 
 		if (r_drawSunRays->integer)
 			tr.sunRaysImage = R_CreateImage("*sunRays", NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, rgbFormat);
 
-		tr.renderDepthImage  = R_CreateImage("*renderdepth",  NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24_ARB);
-		tr.textureDepthImage = R_CreateImage("*texturedepth", NULL, PSHADOW_MAP_SIZE, PSHADOW_MAP_SIZE, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24_ARB);
+		tr.renderDepthImage  = R_CreateImage("*renderdepth",  NULL, width, height, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
+		tr.textureDepthImage = R_CreateImage("*texturedepth", NULL, PSHADOW_MAP_SIZE, PSHADOW_MAP_SIZE, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
 
 		{
 			void *p;
@@ -2808,19 +2968,18 @@ void R_CreateBuiltinImages( void ) {
 			tr.screenSsaoImage = R_CreateImage("*screenSsao", NULL, width / 2, height / 2, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
 		}
 
-		if (r_shadows->integer == 4)
+		for( x = 0; x < MAX_DRAWN_PSHADOWS; x++)
 		{
-			for( x = 0; x < MAX_DRAWN_PSHADOWS; x++)
-			{
-				tr.pshadowMaps[x] = R_CreateImage(va("*shadowmap%i", x), NULL, PSHADOW_MAP_SIZE, PSHADOW_MAP_SIZE, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_RGBA8);
-			}
+			tr.pshadowMaps[x] = R_CreateImage(va("*shadowmap%i", x), NULL, PSHADOW_MAP_SIZE, PSHADOW_MAP_SIZE, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
+			//qglTextureParameterfEXT(tr.pshadowMaps[x]->texnum, GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_R_TO_TEXTURE);
+			//qglTextureParameterfEXT(tr.pshadowMaps[x]->texnum, GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
 		}
 
 		if (r_sunlightMode->integer)
 		{
 			for ( x = 0; x < 4; x++)
 			{
-				tr.sunShadowDepthImage[x] = R_CreateImage(va("*sunshadowdepth%i", x), NULL, r_shadowMapSize->integer, r_shadowMapSize->integer, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24_ARB);
+				tr.sunShadowDepthImage[x] = R_CreateImage(va("*sunshadowdepth%i", x), NULL, r_shadowMapSize->integer, r_shadowMapSize->integer, IMGTYPE_COLORALPHA, IMGFLAG_NO_COMPRESSION | IMGFLAG_CLAMPTOEDGE, GL_DEPTH_COMPONENT24);
 				qglTextureParameterfEXT(tr.sunShadowDepthImage[x]->texnum, GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_R_TO_TEXTURE);
 				qglTextureParameterfEXT(tr.sunShadowDepthImage[x]->texnum, GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
 			}
@@ -2952,7 +3111,7 @@ SKINS
 CommaParse
 
 This is unfortunate, but the skin files aren't
-compatable with our normal parsing rules.
+compatible with our normal parsing rules.
 ==================
 */
 static char *CommaParse( char **data_p ) {
@@ -3060,6 +3219,7 @@ RE_RegisterSkin
 ===============
 */
 qhandle_t RE_RegisterSkin( const char *name ) {
+	skinSurface_t parseSurfaces[MAX_SKIN_SURFACES];
 	qhandle_t	hSkin;
 	skin_t		*skin;
 	skinSurface_t	*surf;
@@ -3070,6 +3230,7 @@ qhandle_t RE_RegisterSkin( const char *name ) {
 	char		*text_p;
 	char		*token;
 	char		surfName[MAX_QPATH];
+	int			totalSurfaces;
 
 	if ( !name || !name[0] ) {
 		ri.Printf( PRINT_DEVELOPER, "Empty name passed to RE_RegisterSkin\n" );
@@ -3109,8 +3270,8 @@ qhandle_t RE_RegisterSkin( const char *name ) {
 	// If not a .skin file, load as a single shader
 	if ( strcmp( name + strlen( name ) - 5, ".skin" ) ) {
 		skin->numSurfaces = 1;
-		skin->surfaces[0] = ri.Hunk_Alloc( sizeof( *skin->surfaces[0] ), h_low );
-		skin->surfaces[0]->shader = R_FindShader( name, LIGHTMAP_NONE, qtrue );
+		skin->surfaces = ri.Hunk_Alloc( sizeof( skinSurface_t ), h_low );
+		skin->surfaces[0].shader = R_FindShader( name, LIGHTMAP_NONE, qtrue );
 		return hSkin;
 	}
 
@@ -3120,6 +3281,7 @@ qhandle_t RE_RegisterSkin( const char *name ) {
 		return 0;
 	}
 
+	totalSurfaces = 0;
 	text_p = text.c;
 	while ( text_p && *text_p ) {
 		// get surface name
@@ -3143,24 +3305,31 @@ qhandle_t RE_RegisterSkin( const char *name ) {
 		// parse the shader name
 		token = CommaParse( &text_p );
 
-		if ( skin->numSurfaces >= MD3_MAX_SURFACES ) {
-			ri.Printf( PRINT_WARNING, "WARNING: Ignoring surfaces in '%s', the max is %d surfaces!\n", name, MD3_MAX_SURFACES );
-			break;
+		if ( skin->numSurfaces < MAX_SKIN_SURFACES ) {
+			surf = &parseSurfaces[skin->numSurfaces];
+			Q_strncpyz( surf->name, surfName, sizeof( surf->name ) );
+			surf->shader = R_FindShader( token, LIGHTMAP_NONE, qtrue );
+			skin->numSurfaces++;
 		}
 
-		surf = skin->surfaces[ skin->numSurfaces ] = ri.Hunk_Alloc( sizeof( *skin->surfaces[0] ), h_low );
-		Q_strncpyz( surf->name, surfName, sizeof( surf->name ) );
-		surf->shader = R_FindShader( token, LIGHTMAP_NONE, qtrue );
-		skin->numSurfaces++;
+		totalSurfaces++;
 	}
 
 	ri.FS_FreeFile( text.v );
 
+	if ( totalSurfaces > MAX_SKIN_SURFACES ) {
+		ri.Printf( PRINT_WARNING, "WARNING: Ignoring excess surfaces (found %d, max is %d) in skin '%s'!\n",
+					totalSurfaces, MAX_SKIN_SURFACES, name );
+	}
 
 	// never let a skin have 0 shaders
 	if ( skin->numSurfaces == 0 ) {
 		return 0;		// use default skin
 	}
+
+	// copy surfaces to skin
+	skin->surfaces = ri.Hunk_Alloc( skin->numSurfaces * sizeof( skinSurface_t ), h_low );
+	memcpy( skin->surfaces, parseSurfaces, skin->numSurfaces * sizeof( skinSurface_t ) );
 
 	return hSkin;
 }
@@ -3180,8 +3349,8 @@ void	R_InitSkins( void ) {
 	skin = tr.skins[0] = ri.Hunk_Alloc( sizeof( skin_t ), h_low );
 	Q_strncpyz( skin->name, "<default skin>", sizeof( skin->name )  );
 	skin->numSurfaces = 1;
-	skin->surfaces[0] = ri.Hunk_Alloc( sizeof( *skin->surfaces[0] ), h_low );
-	skin->surfaces[0]->shader = tr.defaultShader;
+	skin->surfaces = ri.Hunk_Alloc( sizeof( skinSurface_t ), h_low );
+	skin->surfaces[0].shader = tr.defaultShader;
 }
 
 /*
@@ -3210,10 +3379,10 @@ void	R_SkinList_f( void ) {
 	for ( i = 0 ; i < tr.numSkins ; i++ ) {
 		skin = tr.skins[i];
 
-		ri.Printf( PRINT_ALL, "%3i:%s\n", i, skin->name );
+		ri.Printf( PRINT_ALL, "%3i:%s (%d surfaces)\n", i, skin->name, skin->numSurfaces );
 		for ( j = 0 ; j < skin->numSurfaces ; j++ ) {
 			ri.Printf( PRINT_ALL, "       %s = %s\n", 
-				skin->surfaces[j]->name, skin->surfaces[j]->shader->name );
+				skin->surfaces[j].name, skin->surfaces[j].shader->name );
 		}
 	}
 	ri.Printf (PRINT_ALL, "------------------\n");

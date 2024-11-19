@@ -88,7 +88,7 @@ File search order: when FS_FOpenFileRead gets called it will go through the fs_s
 structure and stop on the first successful hit. fs_searchpaths is built with successive
 calls to FS_AddGameDirectory
 
-Additionaly, we search in several subdirectories:
+Additionally, we search in several subdirectories:
 current game is the current mode
 base game is a variable to allow mods based on other mods
 (such as baseq3 + missionpack content combination in a mod for instance)
@@ -174,6 +174,7 @@ or configs will never get loaded from disk!
 
 // every time a new demo pk3 file is built, this checksum must be updated.
 // the easiest way to get it is to just run the game and see what it spits out
+#ifndef STANDALONE
 #define	DEMO_PAK0_CHECKSUM	2985612116u
 static const unsigned int pak_checksums[] = {
 	1566731103u,
@@ -194,6 +195,7 @@ static const unsigned int missionpak_checksums[] =
 	2662638993u,
 	1438664554u
 };
+#endif
 
 // if this is defined, the executable positively won't work with any paks other
 // than the demo pak, even if productid is present.  This is only used for our
@@ -252,6 +254,7 @@ static  cvar_t          *fs_apppath;
 #endif
 static	cvar_t		*fs_steampath;
 static	cvar_t		*fs_gogpath;
+static	cvar_t		*fs_microsoftstorepath;
 
 static	cvar_t		*fs_basepath;
 static	cvar_t		*fs_basegame;
@@ -566,7 +569,7 @@ static void FS_CheckFilenameIsMutable( const char *filename,
 		const char *function )
 {
 	// Check if the filename ends with the library, QVM, or pk3 extension
-	if( COM_CompareExtension( filename, DLL_EXT )
+	if( Sys_DllExtension( filename )
 		|| COM_CompareExtension( filename, ".qvm" )
 		|| COM_CompareExtension( filename, ".pk3" ) )
 	{
@@ -1418,7 +1421,7 @@ long FS_FOpenFileRead(const char *filename, fileHandle_t *file, qboolean uniqueF
 	}
 	else
 	{
-		// When file is NULL, we're querying the existance of the file
+		// When file is NULL, we're querying the existence of the file
 		// If we've got here, it doesn't exist
 		return 0;
 	}
@@ -2204,7 +2207,7 @@ static int FS_AddFileToList( char *name, char *list[MAX_FOUND_FILES], int nfiles
 	}
 	for ( i = 0 ; i < nfiles ; i++ ) {
 		if ( !Q_stricmp( name, list[i] ) ) {
-			return nfiles;		// allready in list
+			return nfiles;		// already in list
 		}
 	}
 	list[nfiles] = CopyString( name );
@@ -2489,19 +2492,22 @@ void FS_GetModDescription( const char *modDir, char *description, int descriptio
 	int				nDescLen;
 	FILE			*file;
 
-	Com_sprintf( descPath, sizeof ( descPath ), "%s/description.txt", modDir );
+	Com_sprintf( descPath, sizeof ( descPath ), "%s%cdescription.txt", modDir, PATH_SEP );
 	nDescLen = FS_SV_FOpenFileRead( descPath, &descHandle );
 
-	if ( nDescLen > 0 && descHandle ) {
+	if ( nDescLen > 0 ) {
 		file = FS_FileForHandle(descHandle);
 		Com_Memset( description, 0, descriptionLen );
 		nDescLen = fread(description, 1, descriptionLen, file);
 		if (nDescLen >= 0) {
 			description[nDescLen] = '\0';
 		}
-		FS_FCloseFile(descHandle);
 	} else {
 		Q_strncpyz( description, modDir, descriptionLen );
+	}
+
+	if ( descHandle ) {
+		FS_FCloseFile( descHandle );
 	}
 }
 
@@ -2927,7 +2933,9 @@ void FS_AddGameDirectory( const char *path, const char *dir ) {
 	// Get .pk3 files
 	pakfiles = Sys_ListFiles(curpath, ".pk3", NULL, &numfiles, qfalse);
 
-	qsort( pakfiles, numfiles, sizeof(char*), paksort );
+	if ( pakfiles ) {
+		qsort( pakfiles, numfiles, sizeof(char*), paksort );
+	}
 
 	if ( fs_numServerPaks ) {
 		numdirs = 0;
@@ -3062,6 +3070,23 @@ qboolean FS_CheckDirTraversal(const char *checkdir)
 	if(strstr(checkdir, "../") || strstr(checkdir, "..\\"))
 		return qtrue;
 	
+	return qfalse;
+}
+
+/*
+================
+FS_InvalidGameDir
+
+return true if path is a reference to current directory or directory traversal
+or a sub-directory
+================
+*/
+qboolean FS_InvalidGameDir( const char *gamedir ) {
+	if ( !strcmp( gamedir, "." ) || !strcmp( gamedir, ".." )
+		|| strchr( gamedir, '/' ) || strchr( gamedir, '\\' ) ) {
+		return qtrue;
+	}
+
 	return qfalse;
 }
 
@@ -3307,7 +3332,32 @@ static void FS_Startup( const char *gameName )
 	fs_homepath = Cvar_Get ("fs_homepath", homePath, CVAR_INIT|CVAR_PROTECTED );
 	fs_gamedirvar = Cvar_Get ("fs_game", "", CVAR_INIT|CVAR_SYSTEMINFO );
 
+	if (!gameName[0]) {
+		Cvar_ForceReset( "com_basegame" );
+	}
+
+	if (!FS_FilenameCompare(fs_gamedirvar->string, gameName)) {
+		// This is the standard base game. Servers and clients should
+		// use "" and not the standard basegame name because this messes
+		// up pak file negotiation and lots of other stuff
+		Cvar_ForceReset( "fs_game" );
+	}
+
+	if (FS_InvalidGameDir(gameName)) {
+		Com_Error( ERR_DROP, "Invalid com_basegame '%s'", gameName );
+	}
+	if (FS_InvalidGameDir(fs_basegame->string)) {
+		Com_Error( ERR_DROP, "Invalid fs_basegame '%s'", fs_basegame->string );
+	}
+	if (FS_InvalidGameDir(fs_gamedirvar->string)) {
+		Com_Error( ERR_DROP, "Invalid fs_game '%s'", fs_gamedirvar->string );
+	}
+
 	// add search path elements in reverse priority order
+	fs_microsoftstorepath = Cvar_Get("fs_microsoftstorepath", Sys_MicrosoftStorePath(), CVAR_INIT | CVAR_PROTECTED);
+	if (fs_microsoftstorepath->string[0]) {
+		FS_AddGameDirectory(fs_microsoftstorepath->string, gameName);
+	}
 	fs_gogpath = Cvar_Get ("fs_gogpath", Sys_GogPath(), CVAR_INIT|CVAR_PROTECTED );
 	if (fs_gogpath->string[0]) {
 		FS_AddGameDirectory( fs_gogpath->string, gameName );
@@ -3367,14 +3417,10 @@ static void FS_Startup( const char *gameName )
 	}
 
 #ifndef STANDALONE
-	if(!com_standalone->integer)
-	{
-		cvar_t	*fs;
-
+	if (!com_standalone->integer) {
 		Com_ReadCDKey(BASEGAME);
-		fs = Cvar_Get ("fs_game", "", CVAR_INIT|CVAR_SYSTEMINFO );
-		if (fs && fs->string[0] != 0) {
-			Com_AppendCDKey( fs->string );
+		if (fs_gamedirvar->string[0]) {
+			Com_AppendCDKey(fs_gamedirvar->string);
 		}
 	}
 #endif
@@ -3408,6 +3454,64 @@ static void FS_Startup( const char *gameName )
 #ifndef STANDALONE
 /*
 ===================
+FS_AppendUserFriendlyPakList
+===================
+*/
+static void FS_AppendUserFriendlyPakList( char *buf, size_t bufsize, int foundPakFiles, int numPakFiles )
+{
+	int missingCount = 0;
+	int missingIndex = 0;
+	int missingMin = numPakFiles;
+	int missingMax = 0;
+	qboolean missingConsecutive = qtrue;
+	int i;
+
+	for ( i = 0; i < numPakFiles; i++ ) {
+		if ( foundPakFiles & ( 1 << i ) ) {
+			continue;
+		}
+
+		missingCount++;
+
+		if ( missingMin > i ) {
+			missingMin = i;
+		}
+		if ( missingMax < i ) {
+			missingMax = i;
+		}
+
+		if ( i > missingMin && ( foundPakFiles & ( 1<< ( i - 1 ) ) ) ) {
+			missingConsecutive = qfalse;
+		}
+	}
+
+	if ( missingConsecutive && missingMax >= missingMin + 2 ) {
+		Q_strcat( buf, bufsize,
+				va( " \"pak%d.pk3\" through \"pak%d.pk3\"",
+					missingMin, missingMax ) );
+	} else {
+		for ( i = 0; i < numPakFiles; i++ ) {
+			if ( foundPakFiles & (1<<i) ) {
+				continue;
+			}
+
+			if ( missingIndex > 0 && missingCount > 2 ) {
+				Q_strcat( buf, bufsize, "," );
+			}
+
+			if ( missingIndex == missingCount - 1 && missingCount > 1 ) {
+				Q_strcat( buf, bufsize, " and" );
+			}
+
+			Q_strcat( buf, bufsize, va( " \"pak%d.pk3\"", i ) );
+
+			missingIndex++;
+		}
+	}
+}
+
+/*
+===================
 FS_CheckPak0
 
 Check whether any of the original id pak files is present,
@@ -3422,17 +3526,19 @@ static void FS_CheckPak0( void )
 {
 	searchpath_t	*path;
 	pack_t		*curpack;
+	const char	*pakBasename;
 	qboolean founddemo = qfalse;
 	unsigned int foundPak = 0, foundTA = 0;
+	qboolean installHome = qfalse;
+	char *installPath;
 
 	for( path = fs_searchpaths; path; path = path->next )
 	{
-		const char* pakBasename = path->pack->pakBasename;
-
 		if(!path->pack)
 			continue;
 
 		curpack = path->pack;
+		pakBasename = curpack->pakBasename;
 
 		if(!Q_stricmpn( curpack->pakGamename, "demoq3", MAX_OSPATH )
 				&& !Q_stricmpn( pakBasename, "pak0", MAX_OSPATH ))
@@ -3554,49 +3660,89 @@ static void FS_CheckPak0( void )
 		}
 	}
 
+#ifdef __linux__
+	{
+		const char *p;
 
-	if(!com_standalone->integer && (foundPak & 0x1ff) != 0x1ff)
+		// Users can't write to the default Flatpak fs_basepath
+		if( ( p = getenv( "FLATPAK_ID" ) ) != NULL && *p != '\0' )
+			installHome = qtrue;
+	}
+#endif
+
+	if(installHome)
+		installPath = fs_homepath->string;
+	else
+		installPath = fs_basepath->string;
+
+	if(!com_standalone->integer && (foundPak & ((1<<NUM_ID_PAKS)-1)) != ((1<<NUM_ID_PAKS)-1))
 	{
 		char errorText[MAX_STRING_CHARS] = "";
 
-		if((foundPak & 0x01) != 0x01)
-		{
-			Q_strcat(errorText, sizeof(errorText),
-					"\"pak0.pk3\" is missing. Please copy it "
-					"from your legitimate Q3 CDROM. ");
-		}
+		Q_strcat(errorText, sizeof(errorText),
+				"Quake 3 data files are missing. Please copy");
 
-		if((foundPak & 0x1fe) != 0x1fe)
-		{
-			Q_strcat(errorText, sizeof(errorText),
-					"Point Release files are missing. Please "
-					"re-install the 1.32 point release. ");
-		}
+		FS_AppendUserFriendlyPakList(errorText, sizeof(errorText), foundPak, NUM_ID_PAKS);
 
 		Q_strcat(errorText, sizeof(errorText),
-				va("Also check that your ioq3 executable is in "
-					"the correct place and that every file "
-					"in the \"%s\" directory is present and readable", BASEGAME));
+				va(" from the \"%s\" directory in your Quake 3 install or CD-ROM to:\n\n"
+				"%s%c%s%c\n\n", BASEGAME, installPath, PATH_SEP, BASEGAME, PATH_SEP));
+
+		Q_strcat(errorText, sizeof(errorText),
+				"Quake 3 must be purchased to legitimately obtain pak0. "
+				"Quake 3 1.32 point release files (pak1 through pak8) "
+				"are freely available. For details see:\n\n"
+				"https://buy.ioquake3.org\n\n");
+
+		if(installHome)
+		{
+			Q_strcat(errorText, sizeof(errorText),
+					va("Also check that every file "
+						"in the \"%s\" directory is present and readable", BASEGAME));
+		}
+		else
+		{
+			Q_strcat(errorText, sizeof(errorText),
+					va("Also check that your ioq3 executable is in "
+						"the correct place and that every file "
+						"in the \"%s\" directory is present and readable", BASEGAME));
+		}
 
 		Com_Error(ERR_FATAL, "%s", errorText);
 	}
 
-	if(!com_standalone->integer && foundTA && (foundTA & 0x0f) != 0x0f)
+	if(!com_standalone->integer && (foundTA & ((1<<NUM_TA_PAKS)-1)) != ((1<<NUM_TA_PAKS)-1)
+			&& (!Q_stricmp(fs_gamedirvar->string, BASETA) || !Q_stricmp(fs_basegame->string, BASETA)))
 	{
 		char errorText[MAX_STRING_CHARS] = "";
 
-		if((foundTA & 0x01) != 0x01)
-		{
-			Com_sprintf(errorText, sizeof(errorText),
-					"\"" BASETA "%cpak0.pk3\" is missing. Please copy it "
-					"from your legitimate Quake 3 Team Arena CDROM. ", PATH_SEP);
-		}
+		Q_strcat(errorText, sizeof(errorText),
+				"Quake 3 Team Arena data files are missing. Please copy");
 
-		if((foundTA & 0x0e) != 0x0e)
+		FS_AppendUserFriendlyPakList(errorText, sizeof(errorText), foundTA, NUM_TA_PAKS);
+
+		Q_strcat(errorText, sizeof(errorText),
+				va(" from the \"%s\" directory in your Quake 3 Team Arena install or CD-ROM to:\n\n"
+				"%s%c%s%c\n\n", BASETA, installPath, PATH_SEP, BASETA, PATH_SEP));
+
+		Q_strcat(errorText, sizeof(errorText),
+				"Quake 3 Team Arena must be purchased to legitimately obtain pak0. "
+				"Quake 3 Team Arena point release files (pak1 through pak3) "
+				"are freely available. For details see:\n\n"
+				"https://buy.ioquake3.org\n\n");
+
+		if(installHome)
 		{
 			Q_strcat(errorText, sizeof(errorText),
-					"Team Arena Point Release files are missing. Please "
-					"re-install the latest Team Arena point release.");
+					va("Also check that every file "
+						"in the \"%s\" directory is present and readable", BASETA));
+		}
+		else
+		{
+			Q_strcat(errorText, sizeof(errorText),
+					va("Also check that your ioq3 executable is in "
+						"the correct place and that every file "
+						"in the \"%s\" directory is present and readable", BASETA));
 		}
 
 		Com_Error(ERR_FATAL, "%s", errorText);
@@ -3929,7 +4075,7 @@ void FS_PureServerSetReferencedPaks( const char *pakSums, const char *pakNames )
 ================
 FS_InitFilesystem
 
-Called only at inital startup, not when the filesystem
+Called only at initial startup, not when the filesystem
 is resetting due to a game change
 ================
 */

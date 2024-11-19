@@ -22,9 +22,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_shade.c
 
 #include "tr_local.h" 
-#if idppc_altivec && !defined(__APPLE__)
-#include <altivec.h>
-#endif
 
 /*
 
@@ -41,9 +38,16 @@ R_DrawElements
 ==================
 */
 
-void R_DrawElements( int numIndexes, glIndex_t firstIndex)
+void R_DrawElements( int numIndexes, int firstIndex )
 {
-	qglDrawElements(GL_TRIANGLES, numIndexes, GL_INDEX_TYPE, BUFFER_OFFSET(firstIndex * sizeof(glIndex_t)));
+	if (tess.useCacheVao)
+	{
+		VaoCache_DrawElements(numIndexes, firstIndex);
+	}
+	else
+	{
+		qglDrawElements(GL_TRIANGLES, numIndexes, GL_INDEX_TYPE, BUFFER_OFFSET(firstIndex * sizeof(glIndex_t)));
+	}
 }
 
 
@@ -65,7 +69,7 @@ R_BindAnimatedImageToTMU
 =================
 */
 static void R_BindAnimatedImageToTMU( textureBundle_t *bundle, int tmu ) {
-	int		index;
+	int64_t index;
 
 	if ( bundle->isVideoMap ) {
 		ri.CIN_RunCinematic(bundle->videoMapHandle);
@@ -81,13 +85,18 @@ static void R_BindAnimatedImageToTMU( textureBundle_t *bundle, int tmu ) {
 
 	// it is necessary to do this messy calc to make sure animations line up
 	// exactly with waveforms of the same frequency
-	index = ri.ftol(tess.shaderTime * bundle->imageAnimationSpeed * FUNCTABLE_SIZE);
+	index = tess.shaderTime * bundle->imageAnimationSpeed * FUNCTABLE_SIZE;
 	index >>= FUNCTABLE_SIZE2;
 
 	if ( index < 0 ) {
 		index = 0;	// may happen with shader time offsets
 	}
-	index %= bundle->numImageAnimations;
+
+	// Windows x86 doesn't load renderer DLL with 64 bit modulus
+	//index %= bundle->numImageAnimations;
+	while ( index >= bundle->numImageAnimations ) {
+		index -= bundle->numImageAnimations;
+	}
 
 	GL_BindToTMU( bundle->image[ index ], tmu );
 }
@@ -115,6 +124,7 @@ static void DrawTris (shaderCommands_t *input) {
 		GLSL_SetUniformMat4(sp, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection);
 		VectorSet4(color, 1, 1, 1, 1);
 		GLSL_SetUniformVec4(sp, UNIFORM_COLOR, color);
+		GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 0);
 
 		R_DrawElements(input->numIndexes, input->firstIndex);
 	}
@@ -178,33 +188,30 @@ extern float EvalWaveForm( const waveForm_t *wf );
 extern float EvalWaveFormClamped( const waveForm_t *wf );
 
 
-static void ComputeTexMods( shaderStage_t *pStage, int bundleNum, float *outMatrix, float *outOffTurb)
+static void ComputeTexMods( shaderStage_t *pStage, int bundleNum, vec4_t outMatrix[8])
 {
 	int tm;
-	float matrix[6], currentmatrix[6];
+	float matrix[6];
+	float tmpmatrix[6];
+	float currentmatrix[6];
+	float turb[2];
 	textureBundle_t *bundle = &pStage->bundle[bundleNum];
-
-	matrix[0] = 1.0f; matrix[2] = 0.0f; matrix[4] = 0.0f;
-	matrix[1] = 0.0f; matrix[3] = 1.0f; matrix[5] = 0.0f;
+	qboolean hasTurb = qfalse;
 
 	currentmatrix[0] = 1.0f; currentmatrix[2] = 0.0f; currentmatrix[4] = 0.0f;
 	currentmatrix[1] = 0.0f; currentmatrix[3] = 1.0f; currentmatrix[5] = 0.0f;
-
-	outMatrix[0] = 1.0f; outMatrix[2] = 0.0f;
-	outMatrix[1] = 0.0f; outMatrix[3] = 1.0f;
-
-	outOffTurb[0] = 0.0f; outOffTurb[1] = 0.0f; outOffTurb[2] = 0.0f; outOffTurb[3] = 0.0f;
 
 	for ( tm = 0; tm < bundle->numTexMods ; tm++ ) {
 		switch ( bundle->texMods[tm].type )
 		{
 			
 		case TMOD_NONE:
-			tm = TR_MAX_TEXMODS;		// break out of for loop
+			matrix[0] = 1.0f; matrix[2] = 0.0f; matrix[4] = 0.0f;
+			matrix[1] = 0.0f; matrix[3] = 1.0f; matrix[5] = 0.0f;
 			break;
 
 		case TMOD_TURBULENT:
-			RB_CalcTurbulentFactors(&bundle->texMods[tm].wave, &outOffTurb[2], &outOffTurb[3]);
+			RB_CalcTurbulentFactors(&bundle->texMods[tm].wave, &turb[0], &turb[1]);
 			break;
 
 		case TMOD_ENTITY_TRANSLATE:
@@ -243,34 +250,67 @@ static void ComputeTexMods( shaderStage_t *pStage, int bundleNum, float *outMatr
 
 		switch ( bundle->texMods[tm].type )
 		{	
-		case TMOD_NONE:
 		case TMOD_TURBULENT:
-		default:
+			outMatrix[tm*2+0][0] = 1; outMatrix[tm*2+0][1] = 0; outMatrix[tm*2+0][2] = 0;
+			outMatrix[tm*2+1][0] = 0; outMatrix[tm*2+1][1] = 1; outMatrix[tm*2+1][2] = 0;
+
+			outMatrix[tm*2+0][3] = turb[0];
+			outMatrix[tm*2+1][3] = turb[1];
+
+			hasTurb = qtrue;
 			break;
 
+		case TMOD_NONE:
 		case TMOD_ENTITY_TRANSLATE:
 		case TMOD_SCROLL:
 		case TMOD_SCALE:
 		case TMOD_STRETCH:
 		case TMOD_TRANSFORM:
 		case TMOD_ROTATE:
-			outMatrix[0] = matrix[0] * currentmatrix[0] + matrix[2] * currentmatrix[1];
-			outMatrix[1] = matrix[1] * currentmatrix[0] + matrix[3] * currentmatrix[1];
+		default:
+			outMatrix[tm*2+0][0] = matrix[0]; outMatrix[tm*2+0][1] = matrix[2]; outMatrix[tm*2+0][2] = matrix[4];
+			outMatrix[tm*2+1][0] = matrix[1]; outMatrix[tm*2+1][1] = matrix[3]; outMatrix[tm*2+1][2] = matrix[5];
 
-			outMatrix[2] = matrix[0] * currentmatrix[2] + matrix[2] * currentmatrix[3];
-			outMatrix[3] = matrix[1] * currentmatrix[2] + matrix[3] * currentmatrix[3];
+			outMatrix[tm*2+0][3] = 0;
+			outMatrix[tm*2+1][3] = 0;
 
-			outOffTurb[0] = matrix[0] * currentmatrix[4] + matrix[2] * currentmatrix[5] + matrix[4];
-			outOffTurb[1] = matrix[1] * currentmatrix[4] + matrix[3] * currentmatrix[5] + matrix[5];
+			tmpmatrix[0] = matrix[0] * currentmatrix[0] + matrix[2] * currentmatrix[1];
+			tmpmatrix[1] = matrix[1] * currentmatrix[0] + matrix[3] * currentmatrix[1];
 
-			currentmatrix[0] = outMatrix[0];
-			currentmatrix[1] = outMatrix[1];
-			currentmatrix[2] = outMatrix[2];
-			currentmatrix[3] = outMatrix[3];
-			currentmatrix[4] = outOffTurb[0];
-			currentmatrix[5] = outOffTurb[1];
+			tmpmatrix[2] = matrix[0] * currentmatrix[2] + matrix[2] * currentmatrix[3];
+			tmpmatrix[3] = matrix[1] * currentmatrix[2] + matrix[3] * currentmatrix[3];
+
+			tmpmatrix[4] = matrix[0] * currentmatrix[4] + matrix[2] * currentmatrix[5] + matrix[4];
+			tmpmatrix[5] = matrix[1] * currentmatrix[4] + matrix[3] * currentmatrix[5] + matrix[5];
+
+			currentmatrix[0] = tmpmatrix[0];
+			currentmatrix[1] = tmpmatrix[1];
+			currentmatrix[2] = tmpmatrix[2];
+			currentmatrix[3] = tmpmatrix[3];
+			currentmatrix[4] = tmpmatrix[4];
+			currentmatrix[5] = tmpmatrix[5];
 			break;
 		}
+	}
+
+	// if turb isn't used, only one matrix is needed
+	if ( !hasTurb ) {
+		tm = 0;
+
+		outMatrix[tm*2+0][0] = currentmatrix[0]; outMatrix[tm*2+0][1] = currentmatrix[2]; outMatrix[tm*2+0][2] = currentmatrix[4];
+		outMatrix[tm*2+1][0] = currentmatrix[1]; outMatrix[tm*2+1][1] = currentmatrix[3]; outMatrix[tm*2+1][2] = currentmatrix[5];
+
+		outMatrix[tm*2+0][3] = 0;
+		outMatrix[tm*2+1][3] = 0;
+		tm++;
+	}
+
+	for ( ; tm < TR_MAX_TEXMODS ; tm++ ) {
+		outMatrix[tm*2+0][0] = 1; outMatrix[tm*2+0][1] = 0; outMatrix[tm*2+0][2] = 0;
+		outMatrix[tm*2+1][0] = 0; outMatrix[tm*2+1][1] = 1; outMatrix[tm*2+1][2] = 0;
+
+		outMatrix[tm*2+0][3] = 0;
+		outMatrix[tm*2+1][3] = 0;
 	}
 }
 
@@ -335,7 +375,7 @@ static void ProjectDlightTexture( void ) {
 		vec4_t vector;
 
 		if ( !( tess.dlightBits & ( 1 << l ) ) ) {
-			continue;	// this surface definately doesn't have any of this light
+			continue;	// this surface definitely doesn't have any of this light
 		}
 
 		dl = &backEnd.refdef.dlights[l];
@@ -382,6 +422,8 @@ static void ProjectDlightTexture( void ) {
 		else {
 			GL_State( GLS_ATEST_GT_0 | GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ONE | GLS_DEPTHFUNC_EQUAL );
 		}
+
+		GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 1);
 
 		R_DrawElements(tess.numIndexes, tess.firstIndex);
 
@@ -660,11 +702,10 @@ static void ForwardDlight( void ) {
 		dlight_t	*dl;
 		shaderProgram_t *sp;
 		vec4_t vector;
-		vec4_t texMatrix;
-		vec4_t texOffTurb;
+		vec4_t texMatrix[8];
 
 		if ( !( tess.dlightBits & ( 1 << l ) ) ) {
-			continue;	// this surface definately doesn't have any of this light
+			continue;	// this surface definitely doesn't have any of this light
 		}
 
 		dl = &backEnd.refdef.dlights[l];
@@ -746,6 +787,7 @@ static void ForwardDlight( void ) {
 		// include GLS_DEPTHFUNC_EQUAL so alpha tested surfaces don't add light
 		// where they aren't rendered
 		GL_State( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHFUNC_EQUAL );
+		GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 0);
 
 		GLSL_SetUniformMat4(sp, UNIFORM_MODELMATRIX, backEnd.or.transformMatrix);
 
@@ -786,9 +828,15 @@ static void ForwardDlight( void ) {
 		if (r_dlightMode->integer >= 2)
 			GL_BindToTMU(tr.shadowCubemaps[l], TB_SHADOWMAP);
 
-		ComputeTexMods( pStage, TB_DIFFUSEMAP, texMatrix, texOffTurb );
-		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX, texMatrix);
-		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXOFFTURB, texOffTurb);
+		ComputeTexMods( pStage, TB_DIFFUSEMAP, texMatrix );
+		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX0, texMatrix[0]);
+		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX1, texMatrix[1]);
+		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX2, texMatrix[2]);
+		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX3, texMatrix[3]);
+		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX4, texMatrix[4]);
+		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX5, texMatrix[5]);
+		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX6, texMatrix[6]);
+		GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX7, texMatrix[7]);
 
 		GLSL_SetUniformInt(sp, UNIFORM_TCGEN0, pStage->bundle[0].tcGen);
 
@@ -827,7 +875,7 @@ static void ProjectPshadowVBOGLSL( void ) {
 		vec4_t vector;
 
 		if ( !( tess.pshadowBits & ( 1 << l ) ) ) {
-			continue;	// this surface definately doesn't have any of this shadow
+			continue;	// this surface definitely doesn't have any of this shadow
 		}
 
 		ps = &backEnd.refdef.pshadows[l];
@@ -858,6 +906,7 @@ static void ProjectPshadowVBOGLSL( void ) {
 		// include GLS_DEPTHFUNC_EQUAL so alpha tested surfaces don't add light
 		// where they aren't rendered
 		GL_State( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHFUNC_EQUAL );
+		GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 0);
 
 		GL_BindToTMU( tr.pshadowMaps[l], TB_DIFFUSEMAP );
 
@@ -901,6 +950,8 @@ static void RB_FogPass( void ) {
 
 		if (glState.vertexAnimation)
 			index |= FOGDEF_USE_VERTEX_ANIMATION;
+		else if (glState.boneAnimation)
+			index |= FOGDEF_USE_BONE_ANIMATION;
 		
 		sp = &tr.fogShader[index];
 	}
@@ -914,6 +965,11 @@ static void RB_FogPass( void ) {
 	GLSL_SetUniformMat4(sp, UNIFORM_MODELVIEWPROJECTIONMATRIX, glState.modelviewProjection);
 
 	GLSL_SetUniformFloat(sp, UNIFORM_VERTEXLERP, glState.vertexAttribsInterpolation);
+
+	if (glState.boneAnimation)
+	{
+		GLSL_SetUniformMat4BoneMatrix(sp, UNIFORM_BONEMATRIX, glState.boneMatrix, glState.boneAnimation);
+	}
 	
 	GLSL_SetUniformInt(sp, UNIFORM_DEFORMGEN, deformGen);
 	if (deformGen != DGEN_NONE)
@@ -939,6 +995,7 @@ static void RB_FogPass( void ) {
 	} else {
 		GL_State( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
 	}
+	GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 0);
 
 	R_DrawElements(tess.numIndexes, tess.firstIndex);
 }
@@ -981,8 +1038,7 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 	{
 		shaderStage_t *pStage = input->xstages[stage];
 		shaderProgram_t *sp;
-		vec4_t texMatrix;
-		vec4_t texOffTurb;
+		vec4_t texMatrix[8];
 
 		if ( !pStage )
 		{
@@ -997,7 +1053,14 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 
 				if (backEnd.currentEntity && backEnd.currentEntity != &tr.worldEntity)
 				{
-					index |= LIGHTDEF_ENTITY;
+					if (glState.boneAnimation)
+					{
+						index |= LIGHTDEF_ENTITY_BONE_ANIMATION;
+					}
+					else
+					{
+						index |= LIGHTDEF_ENTITY_VERTEX_ANIMATION;
+					}
 				}
 
 				if (pStage->stateBits & GLS_ATEST_BITS)
@@ -1020,6 +1083,10 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 				{
 					shaderAttribs |= GENERICDEF_USE_VERTEX_ANIMATION;
 				}
+				else if (glState.boneAnimation)
+				{
+					shaderAttribs |= GENERICDEF_USE_BONE_ANIMATION;
+				}
 
 				if (pStage->stateBits & GLS_ATEST_BITS)
 				{
@@ -1035,7 +1102,14 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 
 			if (backEnd.currentEntity && backEnd.currentEntity != &tr.worldEntity)
 			{
-				index |= LIGHTDEF_ENTITY;
+				if (glState.boneAnimation)
+				{
+					index |= LIGHTDEF_ENTITY_BONE_ANIMATION;
+				}
+				else
+				{
+					index |= LIGHTDEF_ENTITY_VERTEX_ANIMATION;
+				}
 			}
 
 			if (r_sunlightMode->integer && (backEnd.viewParms.flags & VPF_USESUNLIGHT) && (index & LIGHTDEF_LIGHTTYPE_MASK))
@@ -1066,6 +1140,11 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 		GLSL_SetUniformVec3(sp, UNIFORM_LOCALVIEWORIGIN, backEnd.or.viewOrigin);
 
 		GLSL_SetUniformFloat(sp, UNIFORM_VERTEXLERP, glState.vertexAttribsInterpolation);
+
+		if (glState.boneAnimation)
+		{
+			GLSL_SetUniformMat4BoneMatrix(sp, UNIFORM_BONEMATRIX, glState.boneMatrix, glState.boneAnimation);
+		}
 		
 		GLSL_SetUniformInt(sp, UNIFORM_DEFORMGEN, deformGen);
 		if (deformGen != DGEN_NONE)
@@ -1081,6 +1160,23 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 		}
 
 		GL_State( pStage->stateBits );
+		if ((pStage->stateBits & GLS_ATEST_BITS) == GLS_ATEST_GT_0)
+		{
+			GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 1);
+		}
+		else if ((pStage->stateBits & GLS_ATEST_BITS) == GLS_ATEST_LT_80)
+		{
+			GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 2);
+		}
+		else if ((pStage->stateBits & GLS_ATEST_BITS) == GLS_ATEST_GE_80)
+		{
+			GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 3);
+		}
+		else
+		{
+			GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 0);
+		}
+
 
 		{
 			vec4_t baseColor;
@@ -1129,19 +1225,31 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 
 		if (r_lightmap->integer)
 		{
-			vec4_t v;
-			VectorSet4(v, 1.0f, 0.0f, 0.0f, 1.0f);
-			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX, v);
-			VectorSet4(v, 0.0f, 0.0f, 0.0f, 0.0f);
-			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXOFFTURB, v);
+			vec4_t st[2];
+			VectorSet4(st[0], 1.0f, 0.0f, 0.0f, 0.0f);
+			VectorSet4(st[1], 0.0f, 1.0f, 0.0f, 0.0f);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX0, st[0]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX1, st[1]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX2, st[0]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX3, st[1]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX4, st[0]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX5, st[1]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX6, st[0]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX7, st[1]);
 
 			GLSL_SetUniformInt(sp, UNIFORM_TCGEN0, TCGEN_LIGHTMAP);
 		}
 		else
 		{
-			ComputeTexMods(pStage, TB_DIFFUSEMAP, texMatrix, texOffTurb);
-			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX, texMatrix);
-			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXOFFTURB, texOffTurb);
+			ComputeTexMods(pStage, TB_DIFFUSEMAP, texMatrix);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX0, texMatrix[0]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX1, texMatrix[1]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX2, texMatrix[2]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX3, texMatrix[3]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX4, texMatrix[4]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX5, texMatrix[5]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX6, texMatrix[6]);
+			GLSL_SetUniformVec4(sp, UNIFORM_DIFFUSETEXMATRIX7, texMatrix[7]);
 
 			GLSL_SetUniformInt(sp, UNIFORM_TCGEN0, pStage->bundle[0].tcGen);
 			if (pStage->bundle[0].tcGen == TCGEN_VECTOR)
@@ -1343,7 +1451,16 @@ static void RB_RenderShadowmap( shaderCommands_t *input )
 	ComputeDeformValues(&deformGen, deformParams);
 
 	{
-		shaderProgram_t *sp = &tr.shadowmapShader;
+		shaderProgram_t *sp = &tr.shadowmapShader[0];
+
+		if (glState.vertexAnimation)
+		{
+			sp = &tr.shadowmapShader[SHADOWMAPDEF_USE_VERTEX_ANIMATION];
+		}
+		else if (glState.boneAnimation)
+		{
+			sp = &tr.shadowmapShader[SHADOWMAPDEF_USE_BONE_ANIMATION];
+		}
 
 		vec4_t vector;
 
@@ -1354,6 +1471,11 @@ static void RB_RenderShadowmap( shaderCommands_t *input )
 		GLSL_SetUniformMat4(sp, UNIFORM_MODELMATRIX, backEnd.or.transformMatrix);
 
 		GLSL_SetUniformFloat(sp, UNIFORM_VERTEXLERP, glState.vertexAttribsInterpolation);
+
+		if (glState.boneAnimation)
+		{
+			GLSL_SetUniformMat4BoneMatrix(sp, UNIFORM_BONEMATRIX, glState.boneMatrix, glState.boneAnimation);
+		}
 
 		GLSL_SetUniformInt(sp, UNIFORM_DEFORMGEN, deformGen);
 		if (deformGen != DGEN_NONE)
@@ -1368,6 +1490,7 @@ static void RB_RenderShadowmap( shaderCommands_t *input )
 		GLSL_SetUniformFloat(sp, UNIFORM_LIGHTRADIUS, backEnd.viewParms.zFar);
 
 		GL_State( 0 );
+		GLSL_SetUniformInt(sp, UNIFORM_ALPHATEST, 0);
 
 		//
 		// do multitexture
@@ -1604,6 +1727,8 @@ void RB_EndSurface( void ) {
 	tess.numIndexes = 0;
 	tess.numVertexes = 0;
 	tess.firstIndex = 0;
+	tess.useCacheVao = qfalse;
+	tess.useInternalVao = qfalse;
 
 	GLimp_LogComment( "----------\n" );
 }
